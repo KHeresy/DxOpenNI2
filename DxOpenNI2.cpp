@@ -7,8 +7,8 @@
 #include <d3d9.h>
 #include <d3dx9.h>
 
-// OpenNI Header
-#include <NiTE.h>
+// Kinect for Windows SDK Header
+#include <Kinect.h>
 
 // export functions
 __declspec(dllexport) bool __stdcall OpenNIInit( HWND, bool, LPDIRECT3DDEVICE9, WCHAR*, CHAR* );
@@ -20,30 +20,27 @@ __declspec(dllexport) void __stdcall OpenNIIsTracking( bool* );
 __declspec(dllexport) void __stdcall OpenNIGetVersion( float* );
 
 // include libraries
-#pragma comment(lib, "OpenNI2.lib")
-#pragma comment(lib, "NiTE2.lib")
-
-// defines
-#define MAX_DEPTH	10000
-#define NCOLORS		10
+#pragma comment(lib, "Kinect20.lib")
 
 // global variables
-nite::UserTracker	g_UserTracker;
-nite::Point3f		g_BP_Zero;
+IKinectSensor*			g_pSensor			= nullptr;
+IBodyIndexFrameReader*	g_pBodyIndexReader	= nullptr;
+IBodyFrameReader*		g_pBodyReader		= nullptr;
+IBody**					g_aBody				= nullptr;
+INT32					g_iBodyCount		= 0;
+int						g_iWidth			= 0;
+int						g_iHeight			= 0;
 
-bool				g_bDrawPixels		= TRUE;
+bool				g_bDrawPixels		= FALSE;
 bool				g_bDrawBackground	= FALSE;
-bool				TrackingF			= FALSE;
+bool				g_bTracking			= FALSE;
 
-float				Colors[][3] ={{0,1,1},{0,0,1},{0,1,0},{1,1,0},{1,0,0},{1,.5,0},{.5,1,0},{0,.5,1},{.5,0,1},{1,1,.5},{1,1,1}};
+D3DXVECTOR3			g_vJoints[18]; // 0:center 1:neck 2:head 3:shoulderL 4:elbowL 5:wristL 6:shoulderR 7:elbowR 8:wristR 9:legL 10:kneeL 11 ancleL 12:legR 13:kneeR 14:ancleR 15:torso 16:handL 17:handR
 
+const float			NOT_WORK_POS = -999.0f;
 int					texWidth;
 int					texHeight;
-int					TrCount[15];
-float				g_pDepthHist[MAX_DEPTH];
-
-D3DXVECTOR3			BP_Vector[18]; // 0:center 1:neck 2:head 3:shoulderL 4:elbowL 5:wristL 6:shoulderR 7:elbowR 8:wristR 9:legL 10:kneeL 11 ancleL 12:legR 13:kneeR 14:ancleR 15:torso 16:handL 17:handR
-IDirect3DTexture9*	DepthTex = NULL;
+IDirect3DTexture9*	g_DepthImg = NULL;
 
 // DllMain
 BOOL WINAPI DllMain( HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved )
@@ -77,20 +74,19 @@ UINT getClosestPowerOfTwo( UINT n )
 	return m;
 }
 
-// FUNCTION:PosCalc()
-void PosCalc( const nite::Skeleton& rSkeleton, nite::JointType eJoint, D3DXVECTOR3* point )
+void SetPosition(D3DXVECTOR3& point, const Joint& rJoint)
 {
-	const nite::SkeletonJoint& rJoint = rSkeleton.getJoint( eJoint );
-	if( rJoint.getPositionConfidence() < 0.5f )
+	if (rJoint.TrackingState == TrackingState_Tracked)
 	{
-		const nite::Point3f& rPos = rJoint.getPosition();
-		point->x = ( rPos.x - g_BP_Zero.x );
-		point->y = ( rPos.y - g_BP_Zero.y );
-		point->z = ( rPos.z - g_BP_Zero.z );
+		point.x = rJoint.Position.X;
+		point.y = rJoint.Position.Y;
+		point.z = rJoint.Position.Z;
 	}
 	else
 	{
-		point->y = -999.0f;
+		point.x = NOT_WORK_POS;
+		point.y = NOT_WORK_POS;
+		point.z = NOT_WORK_POS;
 	}
 }
 
@@ -105,255 +101,274 @@ void printError( HWND hWnd, const char *name )
 // EXPORT FUNCTION:Clean()
 __declspec(dllexport) void __stdcall OpenNIClean()
 {
-	if( DepthTex )
+	g_bTracking = false;
+
+	if (g_DepthImg)
 	{
-		DepthTex->Release();
-		DepthTex = NULL;
+		g_DepthImg->Release();
+		g_DepthImg = nullptr;
 	}
-	g_UserTracker.destroy();
-	nite::NiTE::shutdown();
-	TrackingF = false;
+
+	if (g_aBody != nullptr)
+	{
+		delete[] g_aBody;
+		g_aBody = nullptr;
+	}
+
+	if (g_pBodyReader != nullptr)
+	{
+		g_pBodyReader->Release();
+		g_pBodyReader = nullptr;
+	}
+
+	if (g_pBodyIndexReader != nullptr)
+	{
+		g_pBodyIndexReader->Release();
+		g_pBodyIndexReader = nullptr;
+	}
+
+	if (g_pSensor != nullptr)
+	{
+		g_pSensor->Close();
+		g_pSensor->Release();
+		g_pSensor = nullptr;
+	}
 }
 
 // EXPORT FUNCTION:Init()
 __declspec(dllexport) bool __stdcall OpenNIInit( HWND hWnd, bool EngFlag, LPDIRECT3DDEVICE9 lpDevice, WCHAR* f_path, CHAR* onifilename )
 {
-	TrackingF=false;
-	for( int i = 0; i < 15; ++ i )
-		TrCount[i] = 0;
+	////
+	g_bTracking = false;
 
-	SetCurrentDirectoryW( f_path );
+	SetCurrentDirectoryW(f_path);
 
-	if( nite::NiTE::initialize() == nite::STATUS_OK )
+	bool bInitialized = true;
+	//. Get default Sensor and open
+	if (GetDefaultKinectSensor(&g_pSensor) == S_OK && g_pSensor->Open() == S_OK)
 	{
-		if( g_UserTracker.create() == nite::STATUS_OK )
+		#pragma region Body Index
+		// Get body index frame source
+		IBodyIndexFrameSource*	pBodyIndexSource = nullptr;
+		if (g_pSensor->get_BodyIndexFrameSource(&pBodyIndexSource) == S_OK)
 		{
-			nite::UserTrackerFrameRef mUserFrame;
-			if( g_UserTracker.readFrame( &mUserFrame ) == nite::STATUS_OK )
+			// Get frame description
+			IFrameDescription* pFrameDescription = nullptr;
+			if (pBodyIndexSource->get_FrameDescription(&pFrameDescription) == S_OK)
 			{
-				openni::VideoFrameRef mDepthMap = mUserFrame.getDepthFrame();
-				int x = mDepthMap.getWidth(),
-					y = mDepthMap.getHeight();
-				
-				texWidth =  getClosestPowerOfTwo( x / 4 );
-				texHeight = getClosestPowerOfTwo( y / 4 );
-				
-				if( FAILED( lpDevice->CreateTexture( texWidth, texHeight, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &DepthTex, NULL ) ) )
-				{
-					MessageBox( hWnd, L"Cannot create depth texture", L"NiTE2", MB_OK );
-					OpenNIClean();
-					return false;
-				}
+				pFrameDescription->get_Width(&g_iWidth);
+				pFrameDescription->get_Height(&g_iHeight);
 
-				return true;
+				// Initial Direct 3D texture
+				texWidth = getClosestPowerOfTwo(g_iWidth / 4);
+				texHeight = getClosestPowerOfTwo(g_iHeight / 4);
+
+				if (FAILED(lpDevice->CreateTexture(texWidth, texHeight, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &g_DepthImg, NULL)))
+				{
+					printError(hWnd, "Cannot create depth texture");
+					bInitialized = false;
+				}
+			}
+			pFrameDescription->Release();
+			pFrameDescription = nullptr;
+
+			//  get frame reader
+			if (pBodyIndexSource->OpenReader(&g_pBodyIndexReader) == S_OK)
+			{
+				// release frame source
+				pBodyIndexSource->Release();
+				pBodyIndexSource = nullptr;
 			}
 			else
 			{
-				printError( hWnd, "UserTracker.readFrame" );
-				MessageBox( hWnd, L"Cannot read user tracker frame", L"NiTE2", MB_OK );
-				OpenNIClean();
-				return false;
+				printError(hWnd, "Can't get body index frame reader");
+				bInitialized = false;
 			}
 		}
 		else
 		{
-			printError( hWnd, "UserTracker.create" );
-			MessageBox( hWnd, L"Cannot create user tracker", L"NiTE2", MB_OK );
-			OpenNIClean();
-			return false;
+			printError(hWnd, "Can't get body index frame source");
+			bInitialized = false;
 		}
+		#pragma endregion
+
+		#pragma region Body
+		// Get body frame source
+		IBodyFrameSource* pBodySource = nullptr;
+		if (g_pSensor->get_BodyFrameSource(&pBodySource) == S_OK)
+		{
+			// Get the number of body
+			if (pBodySource->get_BodyCount(&g_iBodyCount) == S_OK)
+			{
+				// Initialize body array
+				g_aBody = new IBody*[g_iBodyCount];
+				for (int i = 0; i < g_iBodyCount; ++i)
+					g_aBody[i] = nullptr;
+
+				// get frame reader
+				if (pBodySource->OpenReader(&g_pBodyReader) == S_OK)
+				{
+					pBodySource->Release();
+					pBodySource = nullptr;
+				}
+				else
+				{
+					printError(hWnd, "Can't get body frame reader");
+					bInitialized = false;
+				}
+			}
+			else
+			{
+				printError(hWnd, "Can't get body count");
+				bInitialized = false;
+			}
+		}
+		else
+		{
+			printError(hWnd, "Can't get body frame source");
+			bInitialized = false;
+		}
+		#pragma endregion
 	}
 	else
 	{
-		printError( hWnd, "Init" );
-		MessageBox( hWnd, L"Cannot initial NiTE", L"NiTE2", MB_OK );
-		return false;
+		printError(hWnd, "Get Sensor failed");
+		bInitialized = false;
 	}
+
+	if (!bInitialized)
+		OpenNIClean();
+
+	return bInitialized;
 }
 
 // EXPORT FUNCTION:DrawDepthMap()
 __declspec(dllexport) void __stdcall OpenNIDrawDepthMap( bool waitflag )
 {
-	nite::UserTrackerFrameRef mUserFrame;
-	if( g_UserTracker.readFrame( &mUserFrame ) == nite::STATUS_OK )
+	if (g_bDrawPixels)
 	{
-		const nite::UserMap& rUserMap = mUserFrame.getUserMap();
-		const nite::UserId* pLabels = rUserMap.getPixels();
-
-		openni::VideoFrameRef mDepthMap = mUserFrame.getDepthFrame();
-		const openni::DepthPixel* pDepth = static_cast<const openni::DepthPixel*>( mDepthMap.getData() );
-		
-		int iXRes = mDepthMap.getWidth(),
-			iYRes = mDepthMap.getHeight();
-		
-		D3DLOCKED_RECT LPdest;
-		DepthTex->LockRect(0,&LPdest,NULL, 0);
-		UCHAR *pDestImage=(UCHAR*)LPdest.pBits;
-		
-		// Calculate the accumulative histogram
-		ZeroMemory( g_pDepthHist, MAX_DEPTH * sizeof(float) );
-		UINT nValue=0;
-		UINT nNumberOfPoints = 0;
-		for( int nY = 0; nY < iYRes; ++ nY )
+		// Get last frame
+		IBodyIndexFrame* pFrame = nullptr;
+		if (g_pBodyIndexReader->AcquireLatestFrame(&pFrame) == S_OK)
 		{
-			for( int nX = 0; nX < iXRes; ++ nX )
+			// Fill OpenCV image
+			UINT uSize = 0;
+			BYTE* pBuffer = nullptr;
+			if (pFrame->AccessUnderlyingBuffer(&uSize, &pBuffer) == S_OK)
 			{
-				nValue = *pDepth;
-				if(nValue !=0)
+				for (int y = 0; y < g_iHeight; ++y)
 				{
-					g_pDepthHist[nValue]++;
-					nNumberOfPoints++;
-				}
-				pDepth++;
-			}
-		}
-		
-		for( int nIndex = 1; nIndex < MAX_DEPTH; nIndex++ )
-		{
-			g_pDepthHist[nIndex] += g_pDepthHist[nIndex-1];
-		}
-		
-		if( nNumberOfPoints )
-		{
-			for( int nIndex = 1; nIndex < MAX_DEPTH; nIndex++ )
-			{
-				g_pDepthHist[nIndex] = (float)((UINT)(256 * (1.0f - (g_pDepthHist[nIndex] / nNumberOfPoints))));
-			}
-		}
-		
-		UINT nHistValue = 0;
-		if( g_bDrawPixels )
-		{
-			// Prepare the texture map
-			for( int nY = 0; nY < iYRes; nY += 4 )
-			{
-				for( int nX=0; nX < iXRes; nX += 4 )
-				{
-					pDestImage[0] = 0;
-					pDestImage[1] = 0;
-					pDestImage[2] = 0;
-					pDestImage[3] = 0;
-					
-					if( g_bDrawBackground )
+					for (int x = 0; x < g_iWidth; ++x)
 					{
-						nValue = *pDepth;
-						nite::UserId label = *pLabels;
-
-						int nColorID = label % NCOLORS;
-						if( label == 0 )
-							nColorID = NCOLORS;
-						
-						if(nValue != 0)
+						int uBodyIdx = pBuffer[x + y * g_iWidth];
+						if (uBodyIdx < 6)
 						{
-							nHistValue = (UINT)(g_pDepthHist[nValue]);
-
-							pDestImage[0] = (UINT)(nHistValue * Colors[nColorID][0]); 
-							pDestImage[1] = (UINT)(nHistValue * Colors[nColorID][1]);
-							pDestImage[2] = (UINT)(nHistValue * Colors[nColorID][2]);
-							pDestImage[3] = 255;
+						}
+						else
+						{
 						}
 					}
-
-					pDepth		+= 4;
-					pLabels		+= 4;
-					pDestImage	+= 4;
 				}
-				
-				int pg = iXRes * 3;
-				pDepth += pg;
-				pLabels += pg;
-				pDestImage += (texWidth - iXRes)*4+pg;
 			}
-		}
-		else
-		{
-			memset( LPdest.pBits, 0, 4 * 2 * iXRes * iYRes );
-		}
-		DepthTex->UnlockRect(0);
 
-		const nite::Array<nite::UserData>& aUsers = mUserFrame.getUsers();
-		for( int iIdx = 0; iIdx < aUsers.getSize(); ++ iIdx )
-		{
-			const nite::UserData& rUser = aUsers[iIdx];
-			if( rUser.isNew() )
-			{
-				g_UserTracker.startPoseDetection( rUser.getId(), nite::POSE_PSI );
-			}
-			else
-			{
-				const nite::PoseData& rPose = rUser.getPose( nite::POSE_PSI );
-				if( rPose.isEntered() )
-				{
-					g_UserTracker.stopPoseDetection( rUser.getId(), nite::POSE_PSI );
-					g_UserTracker.startSkeletonTracking( rUser.getId() );
-				}
+			// release frame
+			pFrame->Release();
 
-				const nite::Skeleton& rSkeleton = rUser.getSkeleton();
-				if( rSkeleton.getState() == nite::SKELETON_TRACKED )
+			// Lock texture
+			D3DLOCKED_RECT LPdest;
+			g_DepthImg->LockRect(0, &LPdest, NULL, 0);
+			UCHAR *pDestImage = (UCHAR*)LPdest.pBits;
+
+			// TODO: Update texture
+
+			// unlock texture
+			g_DepthImg->UnlockRect(0);
+		}
+	}
+
+	// Get last frame
+	IBodyFrame* pFrame = nullptr;
+	if (g_pBodyReader->AcquireLatestFrame(&pFrame) == S_OK)
+	{
+		// get Body data
+		if (pFrame->GetAndRefreshBodyData(g_iBodyCount, g_aBody) == S_OK)
+		{
+			// for each body
+			for (int i = 0; i < g_iBodyCount; ++i)
+			{
+				IBody* pBody = g_aBody[i];
+
+				// check if is tracked
+				BOOLEAN bTracked = false;
+				if ((pBody->get_IsTracked(&bTracked) == S_OK) && bTracked)
 				{
-					if( TrCount[iIdx] < 4 )
+					// get joint position
+					Joint aJoints[JointType::JointType_Count];
+					if (pBody->GetJoints(JointType::JointType_Count, aJoints) == S_OK)
 					{
-						TrCount[iIdx]++;
-						if( TrCount[iIdx] == 4 )
+						SetPosition(g_vJoints[0], aJoints[JointType_SpineBase]);
+						SetPosition(g_vJoints[1], aJoints[JointType_Neck]);
+						SetPosition(g_vJoints[2], aJoints[JointType_Head]);
+
+						SetPosition(g_vJoints[3], aJoints[JointType_ShoulderLeft]);
+						SetPosition(g_vJoints[4], aJoints[JointType_ElbowLeft]);
+						SetPosition(g_vJoints[5], aJoints[JointType_WristLeft]);
+
+						SetPosition(g_vJoints[6], aJoints[JointType_ShoulderRight]);
+						SetPosition(g_vJoints[7], aJoints[JointType_ElbowRight]);
+						SetPosition(g_vJoints[8], aJoints[JointType_WristRight]);
+
+						SetPosition(g_vJoints[9], aJoints[JointType_HipLeft]);
+						SetPosition(g_vJoints[10], aJoints[JointType_KneeLeft]);
+						SetPosition(g_vJoints[11], aJoints[JointType_FootLeft]);
+
+						SetPosition(g_vJoints[12], aJoints[JointType_HipRight]);
+						SetPosition(g_vJoints[13], aJoints[JointType_KneeRight]);
+						SetPosition(g_vJoints[14], aJoints[JointType_FootRight]);
+
+						SetPosition(g_vJoints[15], aJoints[JointType_SpineMid]);
+						SetPosition(g_vJoints[16], aJoints[JointType_HandLeft]);
+						SetPosition(g_vJoints[17], aJoints[JointType_HandRight]);
+
+						// shifht to center
+						for (int i = 1; i < 18; ++i)
 						{
-							TrackingF = true;
-							const nite::Point3f& rPos = rSkeleton.getJoint( nite::JOINT_TORSO ).getPosition();
-							g_BP_Zero.x = rPos.x;
-							g_BP_Zero.z = rPos.z;
-							g_BP_Zero.y = float( rSkeleton.getJoint( nite::JOINT_LEFT_HIP ).getPosition().y + rSkeleton.getJoint( nite::JOINT_RIGHT_HIP ).getPosition().y ) / 2;
+							if (g_vJoints[i].y != NOT_WORK_POS)
+							{
+								g_vJoints[i].x -= g_vJoints[0].x;
+								g_vJoints[i].y -= g_vJoints[0].y;
+								g_vJoints[i].z -= g_vJoints[0].z;
+							}
 						}
+
+						g_vJoints[0].y = 0.0f;
+						g_bTracking = true;
+						break;
 					}
-
-					PosCalc( rSkeleton, nite::JOINT_TORSO,			&BP_Vector[0] );
-					PosCalc( rSkeleton, nite::JOINT_NECK,			&BP_Vector[1]);
-					PosCalc( rSkeleton, nite::JOINT_HEAD,			&BP_Vector[2]);
-					PosCalc( rSkeleton, nite::JOINT_LEFT_SHOULDER,	&BP_Vector[3]);
-					PosCalc( rSkeleton, nite::JOINT_LEFT_ELBOW,		&BP_Vector[4]);
-					PosCalc( rSkeleton, nite::JOINT_RIGHT_SHOULDER,	&BP_Vector[6]);
-					PosCalc( rSkeleton, nite::JOINT_RIGHT_ELBOW,	&BP_Vector[7]);
-					PosCalc( rSkeleton, nite::JOINT_LEFT_HIP,		&BP_Vector[9]);
-					PosCalc( rSkeleton, nite::JOINT_LEFT_KNEE,		&BP_Vector[10]);
-					PosCalc( rSkeleton, nite::JOINT_LEFT_FOOT,		&BP_Vector[11]);
-					PosCalc( rSkeleton, nite::JOINT_RIGHT_HIP,		&BP_Vector[12]);
-					PosCalc( rSkeleton, nite::JOINT_RIGHT_KNEE,		&BP_Vector[13]);
-					PosCalc( rSkeleton, nite::JOINT_RIGHT_FOOT,		&BP_Vector[14]);
-					PosCalc( rSkeleton, nite::JOINT_TORSO,			&BP_Vector[15]);
-					PosCalc( rSkeleton, nite::JOINT_LEFT_HAND,		&BP_Vector[16]);
-					PosCalc( rSkeleton, nite::JOINT_RIGHT_HAND,		&BP_Vector[17]);
-					//PosCalc( rSkeleton, nite::XN_SKEL_LEFT_WRIST,	&BP_Vector[5]);
-					//PosCalc( rSkeleton, nite::XN_SKEL_RIGHT_WRIST,	&BP_Vector[8]);
-
-					BP_Vector[5] = BP_Vector[16];
-					BP_Vector[8] = BP_Vector[17];
-
-					BP_Vector[0].y = ( BP_Vector[9].y + BP_Vector[12].y ) / 2.0f;
-					break;
-				}
-				else
-				{
-					TrCount[iIdx]=0;
 				}
 			}
 		}
+		// release frame
+		pFrame->Release();
 	}
 }
 
 // DepthTexture()
 __declspec(dllexport) void __stdcall OpenNIDepthTexture(IDirect3DTexture9** lpTex)
 {
-	*lpTex = DepthTex;
+	*lpTex = g_DepthImg;
 }
 
 // GetSkeltonJointPosition()
 __declspec(dllexport) void __stdcall OpenNIGetSkeltonJointPosition(int num,D3DXVECTOR3* vec)
 {
-	*vec = BP_Vector[num];
+	*vec = g_vJoints[num];
 }
 
 // IsTracking()
 __declspec(dllexport) void __stdcall OpenNIIsTracking(bool* lpb)
 {
-	if(TrackingF)
+	if(g_bTracking)
 		*lpb = true;
 	else
 		*lpb = false;
