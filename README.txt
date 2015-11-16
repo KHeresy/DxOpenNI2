@@ -1,23 +1,27 @@
-DxOpenNI2
+DxOpenNI Kinect for Windows SDK v2 Version
 =========
 
-DxOpenNI.dll for MikuMiku Dance, OpenNI 2 and NiTE 2 version
+DxOpenNI.dll for MikuMiku Dance, with Kinect for Windows SDK
 
 ========
 See the detail in: 
   
-http://kheresy.wordpress.com/2013/03/07/dxopenni-for-openni-2/
-http://sdrv.ms/Zp3vhg
-
+http://kheresy.wordpress.com/
 (In Traditional Chinese) 
 
 If you have any problem, please reply in the blog post. (OK in English) 
 
-DxOpenNI.dll is the module for MikuMikuDance ( http://www.geocities.jp/higuchuu4/index_e.htm ) to support Microsoft Kinect motion capture. The author of MMD developed it with OpenNI 1.x only, doesn't support new OpenNI 2.x. So I modify the 1.30 source code, replace the OpenNI 1.x code with OpenNI 2 and NiTE 2. To use this module, pleas install OpenNI 2 and NiTE 2 first. After install OpenNI 2 and NiTE 2, please copy all the files in the "Redist" directory, paste to the MMD directory.
+DxOpenNI.dll is the module for MikuMikuDance ( http://www.geocities.jp/higuchuu4/index_e.htm ) to support Microsoft Kinect motion capture. 
+The author of MMD developed it with OpenNI 1.x only, doesn't support Kinect for Winodws v2 Sensor.
+So I modify the 1.30 source code, replace the OpenNI 1.x code with Kinect for Windows SDK v2. 
+This only works with Kinect for Windows SDK v2 and the Kinect v2 sensor.
+Please download and install Kinect for Windows SDK v2 from https://www.microsoft.com/en-us/kinectforwindows/develop/.
 
 Next, put the "DxOpenNI.dll" file to the "Data" directory in MMD. It should work now. 
 
-Because I build this with VisualStudio 2012, user may need to install " Visual C++ Redistributable Packages". You can find the file in: http://www.microsoft.com/en-us/download/details.aspx?id=30679. Please download and install the file "vcredist_x86.exe". 
+Because I build this with VisualStudio 2013, user may need to install " Visual C++ Redistributable Packages". 
+You can find the file in: https://www.microsoft.com/en-us/download/details.aspx?id=40784. 
+Please download and install the file "vcredist_x86.exe" or "vcredist_x64.exe". 
 
 ========
 Note: 

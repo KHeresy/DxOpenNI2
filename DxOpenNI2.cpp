@@ -31,15 +31,15 @@ INT32					g_iBodyCount		= 0;
 int						g_iWidth			= 0;
 int						g_iHeight			= 0;
 
-bool				g_bDrawPixels		= FALSE;
-bool				g_bDrawBackground	= FALSE;
 bool				g_bTracking			= FALSE;
 
 D3DXVECTOR3			g_vJoints[18]; // 0:center 1:neck 2:head 3:shoulderL 4:elbowL 5:wristL 6:shoulderR 7:elbowR 8:wristR 9:legL 10:kneeL 11 ancleL 12:legR 13:kneeR 14:ancleR 15:torso 16:handL 17:handR
 
 const float			NOT_WORK_POS = -999.0f;
-int					texWidth;
-int					texHeight;
+bool				g_bDrawPixels = TRUE;
+
+int					g_iTexWidth;
+int					g_iTexHeight;
 IDirect3DTexture9*	g_DepthImg = NULL;
 
 // DllMain
@@ -78,9 +78,9 @@ void SetPosition(D3DXVECTOR3& point, const Joint& rJoint)
 {
 	if (rJoint.TrackingState == TrackingState_Tracked)
 	{
-		point.x = rJoint.Position.X;
-		point.y = rJoint.Position.Y;
-		point.z = rJoint.Position.Z;
+		point.x = rJoint.Position.X * 100;
+		point.y = rJoint.Position.Y * 100;
+		point.z = rJoint.Position.Z * 100;
 	}
 	else
 	{
@@ -138,7 +138,6 @@ __declspec(dllexport) void __stdcall OpenNIClean()
 // EXPORT FUNCTION:Init()
 __declspec(dllexport) bool __stdcall OpenNIInit( HWND hWnd, bool EngFlag, LPDIRECT3DDEVICE9 lpDevice, WCHAR* f_path, CHAR* onifilename )
 {
-	////
 	g_bTracking = false;
 
 	SetCurrentDirectoryW(f_path);
@@ -160,10 +159,10 @@ __declspec(dllexport) bool __stdcall OpenNIInit( HWND hWnd, bool EngFlag, LPDIRE
 				pFrameDescription->get_Height(&g_iHeight);
 
 				// Initial Direct 3D texture
-				texWidth = getClosestPowerOfTwo(g_iWidth / 4);
-				texHeight = getClosestPowerOfTwo(g_iHeight / 4);
+				g_iTexWidth = getClosestPowerOfTwo(g_iWidth / 4);
+				g_iTexHeight = getClosestPowerOfTwo(g_iHeight / 4);
 
-				if (FAILED(lpDevice->CreateTexture(texWidth, texHeight, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &g_DepthImg, NULL)))
+				if (FAILED(lpDevice->CreateTexture(g_iTexWidth, g_iTexHeight, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &g_DepthImg, NULL)))
 				{
 					printError(hWnd, "Cannot create depth texture");
 					bInitialized = false;
@@ -256,33 +255,43 @@ __declspec(dllexport) void __stdcall OpenNIDrawDepthMap( bool waitflag )
 			BYTE* pBuffer = nullptr;
 			if (pFrame->AccessUnderlyingBuffer(&uSize, &pBuffer) == S_OK)
 			{
-				for (int y = 0; y < g_iHeight; ++y)
+				// Lock texture
+				D3DLOCKED_RECT LPdest;
+				g_DepthImg->LockRect(0, &LPdest, NULL, 0);
+				UCHAR *pDestImage = (UCHAR*)LPdest.pBits;
+
+				for (int y = 0; y < g_iTexHeight; ++y)
 				{
-					for (int x = 0; x < g_iWidth; ++x)
+					int iOY = y * g_iHeight / g_iTexHeight;
+					for (int x = 0; x < g_iTexWidth; ++x)
 					{
-						int uBodyIdx = pBuffer[x + y * g_iWidth];
+						int iOX = x * g_iWidth / g_iTexWidth;
+
+						int uBodyIdx = pBuffer[iOX + iOY * g_iWidth];
+						int DestIndex = ( x + y * g_iTexWidth ) * 4;
 						if (uBodyIdx < 6)
 						{
+							pDestImage[DestIndex] = 255;
+							pDestImage[DestIndex+1] = 0;
+							pDestImage[DestIndex+2] = 0;
+							pDestImage[DestIndex+3] = 255;
 						}
 						else
 						{
+							pDestImage[DestIndex] = 0;
+							pDestImage[DestIndex + 1] = 0;
+							pDestImage[DestIndex + 2] = 0;
+							pDestImage[DestIndex + 3] = 0;
 						}
 					}
 				}
+
+				// unlock texture
+				g_DepthImg->UnlockRect(0);
 			}
 
 			// release frame
 			pFrame->Release();
-
-			// Lock texture
-			D3DLOCKED_RECT LPdest;
-			g_DepthImg->LockRect(0, &LPdest, NULL, 0);
-			UCHAR *pDestImage = (UCHAR*)LPdest.pBits;
-
-			// TODO: Update texture
-
-			// unlock texture
-			g_DepthImg->UnlockRect(0);
 		}
 	}
 
@@ -320,11 +329,11 @@ __declspec(dllexport) void __stdcall OpenNIDrawDepthMap( bool waitflag )
 
 						SetPosition(g_vJoints[9], aJoints[JointType_HipLeft]);
 						SetPosition(g_vJoints[10], aJoints[JointType_KneeLeft]);
-						SetPosition(g_vJoints[11], aJoints[JointType_FootLeft]);
+						SetPosition(g_vJoints[11], aJoints[JointType_AnkleLeft]);
 
 						SetPosition(g_vJoints[12], aJoints[JointType_HipRight]);
 						SetPosition(g_vJoints[13], aJoints[JointType_KneeRight]);
-						SetPosition(g_vJoints[14], aJoints[JointType_FootRight]);
+						SetPosition(g_vJoints[14], aJoints[JointType_AnkleRight]);
 
 						SetPosition(g_vJoints[15], aJoints[JointType_SpineMid]);
 						SetPosition(g_vJoints[16], aJoints[JointType_HandLeft]);
@@ -341,7 +350,6 @@ __declspec(dllexport) void __stdcall OpenNIDrawDepthMap( bool waitflag )
 							}
 						}
 
-						g_vJoints[0].y = 0.0f;
 						g_bTracking = true;
 						break;
 					}
